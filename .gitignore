@@ -1,0 +1,20 @@
+# AWS SAM
+.aws-sam/
+samconfig.toml
+
+# Node
+node_modules/
+npm-debug.log
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Env / secrets — never commit
+.env
+*.pem
+aws-credentials
+
+# OS
+.DS_Store

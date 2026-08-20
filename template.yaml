@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31   # ← this line makes it a SAM template (not plain CloudFormation)
+Description: Event-driven Order pipeline - Order -> Payment -> Fulfilment, with SQS, DLQs, SNS fan-out, and Lambda
+
+# Global settings applied to ALL functions (saves repeating them)
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 15
+    MemorySize: 128
+
+Resources:
+
+  # ========== SNS TOPIC (fan-out) ==========
+  # One "order placed" event is published here; multiple subscribers receive it.
+  OrderTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: order-events
+
+  # ========== SQS QUEUES + DEAD-LETTER QUEUES ==========
+
+  # --- Payment queue + its DLQ ---
+  PaymentDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: payment-dlq          # failed payment messages land here
+
+  PaymentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: payment-queue
+      VisibilityTimeout: 90           # must be >= function timeout (see note below)
+      RedrivePolicy:                  # THIS wires the DLQ to the queue
+        deadLetterTargetArn: !GetAtt PaymentDLQ.Arn
+        maxReceiveCount: 3            # after 3 failed tries, move message to the DLQ
+
+  # --- Fulfilment queue + its DLQ ---
+  FulfilmentDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: fulfilment-dlq
+
+  FulfilmentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: fulfilment-queue
+      VisibilityTimeout: 90
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FulfilmentDLQ.Arn
+        maxReceiveCount: 3
+
+  # ========== LAMBDA FUNCTIONS ==========
+
+  # --- Order function: the entry point ---
+  # Publishes to SNS (fan-out) AND sends a message to the Payment queue.
+  OrderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: order-function
+      CodeUri: functions/order/
+      Handler: app.handler
+      Environment:
+        Variables:
+          PAYMENT_QUEUE_URL: !Ref PaymentQueue
+          ORDER_TOPIC_ARN: !Ref OrderTopic
+      Policies:                       # least-privilege permissions
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt PaymentQueue.QueueName
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt OrderTopic.TopicName
+
+  # --- Payment function: triggered BY the payment queue ---
+  # Processes payment, then sends the order to the Fulfilment queue.
+  PaymentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: payment-function
+      CodeUri: functions/payment/
+      Handler: app.handler
+      Environment:
+        Variables:
+          FULFILMENT_QUEUE_URL: !Ref FulfilmentQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt FulfilmentQueue.QueueName
+      Events:
+        PaymentTrigger:
+          Type: SQS                   # ← this is what makes SQS TRIGGER the Lambda
+          Properties:
+            Queue: !GetAtt PaymentQueue.Arn
+            BatchSize: 1
+
+  # --- Fulfilment function: triggered BY the fulfilment queue ---
+  # Final step - completes the order.
+  FulfilmentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: fulfilment-function
+      CodeUri: functions/fulfilment/
+      Handler: app.handler
+      Events:
+        FulfilmentTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FulfilmentQueue.Arn
+            BatchSize: 1
+
+  # --- Audit function: triggered BY the SNS topic (fan-out demo) ---
+  # Every order event is broadcast here IN ADDITION to going down the queue chain.
+  AuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: audit-function
+      CodeUri: functions/audit/
+      Handler: app.handler
+      Events:
+        AuditTrigger:
+          Type: SNS                   # ← SNS triggers this Lambda
+          Properties:
+            Topic: !Ref OrderTopic
+
+# ========== OUTPUTS ==========
+# Handy references printed after deploy
+Outputs:
+  OrderFunctionName:
+    Value: !Ref OrderFunction
+  PaymentQueueUrl:
+    Value: !Ref PaymentQueue
+  OrderTopicArn:
+    Value: !Ref OrderTopic
