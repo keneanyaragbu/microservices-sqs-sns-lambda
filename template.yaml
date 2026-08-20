@@ -69,7 +69,12 @@ Resources:
             QueueName: !GetAtt PaymentQueue.QueueName
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt OrderTopic.TopicName
-
+      Events:
+        PlaceOrder:
+          Type: Api
+          Properties:
+            Path: /order
+            Method: post
   # --- Payment function: triggered BY the payment queue ---
   # Processes payment, then sends the order to the Fulfilment queue.
   PaymentFunction:
@@ -129,3 +134,6 @@ Outputs:
     Value: !Ref PaymentQueue
   OrderTopicArn:
     Value: !Ref OrderTopic
+  OrderApiUrl:
+    Description: "POST orders to this endpoint"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/order"
